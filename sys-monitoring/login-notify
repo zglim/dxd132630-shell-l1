@@ -4,11 +4,11 @@
 # Description: Sends an email when user logs in to system.
 # Script Maintainer: Jacob Amey
 #
-# Last Updated: July 9th 2013
+# Last Updated: 2026-06-15 (refactored)
 ##################################################
 # Mail Configuration
 #
-SUBJECT="Root Login Alert:`hostname`"
+SUBJECT="Root Login Alert: $(hostname)"
 EMAIL="changeme@email.com"
 ###################################################
 # Logging Settings
@@ -18,44 +18,91 @@ LOG_FILE=/var/log/login.log
 ###################################################
 # Notification Variables
 #
-KNOWN_IPS="127.0.0.1" # IPs you do not want to be notified about.
-WHO=`w -si`
-loginip=`echo $SSH_CLIENT | awk '{print $1}'`
-authorized=false;
+KNOWN_IPS="127.0.0.1" # IPs you do not want to be notified about (space-separated).
+WHO="$(w -si 2>/dev/null || echo '(unable to retrieve)')"
+###################################################
+# Extract login IP safely
+#
+loginip=""
+login_source="unknown"
+if [ -n "${SSH_CLIENT:-}" ]; then
+    loginip="$(echo "$SSH_CLIENT" | awk '{print $1}')"
+    login_source="ssh"
+elif [ -n "${SSH_CONNECTION:-}" ]; then
+    loginip="$(echo "$SSH_CONNECTION" | awk '{print $1}')"
+    login_source="ssh"
+else
+    loginip="(local)"
+    login_source="local"
+fi
+authorized=false
+###################################################
+# is_known_ip: reliable whitelist check
+#   - trims leading/trailing whitespace from each entry
+#   - skips empty entries (e.g. from duplicate spaces)
+#   - returns 0 (true) if IP matches, 1 otherwise
+#
+is_known_ip() {
+    local check_ip="$1"
+    local IFS=' ,;'  # support space, comma, semicolon as separators
+    for entry in $KNOWN_IPS; do
+        # Trim leading and trailing whitespace
+        local trimmed
+        trimmed="$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        if [ -n "$trimmed" ] && [ "$check_ip" = "$trimmed" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
 ###################################################
 # message Function
 #
 function message {
-                echo "${msgheader}`hostname`"
-                echo
-                echo "------------: Login Info :---------------"
-                echo
-                echo "Login IP : $loginip"
-                echo "Login User: `whoami`"
-                echo "Date-Time:`date`"
-                echo
-                echo "------------: Logged in users :----------"
-                echo
-                echo "$WHO"
-                }
-# End message Function
+    echo "${msgheader}$(hostname)"
+    echo
+    echo "------------: Login Info :---------------"
+    echo
+    echo "Login IP  : $loginip"
+    echo "Login User: $(whoami)"
+    echo "Date-Time : $(date)"
+    echo "Source    : $login_source"
+    echo
+    echo "------------: Logged in users :----------"
+    echo
+    echo "$WHO"
+}
 ###################################################
-# Determine authorization, Send Email if not.
+# Determine authorization, send email if not.
 #
-for ip in $KNOWN_IPS; do
-        if [ "$loginip" == "$ip" ]; then
-                authorized=true;
-                msgheader="Authorized Login to Server: "
-        fi
-done
-if [ ! "$authorized" == "true" ];then
-        msgheader="Unauthorized Login to Server: " message | mail -s "$SUBJECT" "$EMAIL"
+if is_known_ip "$loginip"; then
+    authorized=true
+    msgheader="Authorized Login to Server: "
+else
+    authorized=false
+    msgheader="Unauthorized Login to Server: "
+fi
+
+# Build the message body once, reuse for both email and log.
+msg_body="$(message)"
+
+if [ "$authorized" != "true" ]; then
+    if command -v mail >/dev/null 2>&1; then
+        echo "$msg_body" | mail -s "$SUBJECT" "$EMAIL" 2>/dev/null || true
+    else
+        echo "[login-notify] WARNING: 'mail' command not found; skipping email notification." >&2
+    fi
 fi
 ###################################################
-# Logging statment
+# Logging statement
 #
-if [ "$Logging" == "true" ]; then
-	touch $LOG_FILE
-        message >> $LOG_FILE
+if [ "$Logging" = "true" ]; then
+    log_dir="$(dirname "$LOG_FILE")"
+    if [ -d "$log_dir" ] && [ -w "$log_dir" ]; then
+        echo "$msg_body" >> "$LOG_FILE" 2>/dev/null || \
+            echo "[login-notify] WARNING: could not write to $LOG_FILE." >&2
+    else
+        echo "[login-notify] WARNING: log directory '$log_dir' does not exist or is not writable." >&2
+    fi
 fi
 # EOF
