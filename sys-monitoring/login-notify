@@ -8,54 +8,94 @@
 ##################################################
 # Mail Configuration
 #
-SUBJECT="Root Login Alert:`hostname`"
-EMAIL="changeme@email.com"
+SUBJECT="${SUBJECT:-Root Login Alert:$(hostname)}"
+EMAIL="${EMAIL:-changeme@email.com}"
 ###################################################
 # Logging Settings
 #
-Logging=true; #true/false
-LOG_FILE=/var/log/login.log
+Logging="${Logging:-true}"  #true/false
+LOG_FILE="${LOG_FILE:-/var/log/login.log}"
 ###################################################
 # Notification Variables
 #
-KNOWN_IPS="127.0.0.1" # IPs you do not want to be notified about.
-WHO=`w -si`
-loginip=`echo $SSH_CLIENT | awk '{print $1}'`
-authorized=false;
+KNOWN_IPS="${KNOWN_IPS:-127.0.0.1}" # IPs you do not want to be notified about (space-separated).
+WHO=$(w -si 2>/dev/null || echo "(unable to retrieve logged-in users)")
+
+# Determine login IP — handle SSH, local, and su scenarios
+if [ -n "$SSH_CLIENT" ]; then
+    loginip=$(echo "$SSH_CLIENT" | awk '{print $1}')
+elif [ -n "$SSH_CONNECTION" ]; then
+    loginip=$(echo "$SSH_CONNECTION" | awk '{print $1}')
+else
+    loginip="local"
+fi
+
+authorized=false
 ###################################################
-# message Function
+# is_known_ip — reliable whitelist check
+#   Normalises the KNOWN_IPS list (trims spaces, deduplicates)
+#   and does an exact match against the supplied IP.
 #
-function message {
-                echo "${msgheader}`hostname`"
-                echo
-                echo "------------: Login Info :---------------"
-                echo
-                echo "Login IP : $loginip"
-                echo "Login User: `whoami`"
-                echo "Date-Time:`date`"
-                echo
-                echo "------------: Logged in users :----------"
-                echo
-                echo "$WHO"
-                }
+is_known_ip() {
+    local check_ip="$1"
+    local ip
+    # Build a deduplicated, trimmed list
+    for ip in $KNOWN_IPS; do
+        ip=$(echo "$ip" | tr -d '[:space:]')
+        [ -z "$ip" ] && continue
+        if [ "$check_ip" = "$ip" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+###################################################
+# message Function — builds the alert body
+#
+message() {
+    echo "${msgheader}$(hostname)"
+    echo
+    echo "------------: Login Info :---------------"
+    echo
+    echo "Login IP : $loginip"
+    echo "Login User: $(whoami)"
+    echo "Date-Time: $(date)"
+    echo
+    echo "------------: Logged in users :----------"
+    echo
+    echo "$WHO"
+}
 # End message Function
 ###################################################
-# Determine authorization, Send Email if not.
+# Determine authorization
 #
-for ip in $KNOWN_IPS; do
-        if [ "$loginip" == "$ip" ]; then
-                authorized=true;
-                msgheader="Authorized Login to Server: "
-        fi
-done
-if [ ! "$authorized" == "true" ];then
-        msgheader="Unauthorized Login to Server: " message | mail -s "$SUBJECT" "$EMAIL"
+if is_known_ip "$loginip"; then
+    authorized=true
+    msgheader="Authorized Login to Server: "
+else
+    msgheader="Unauthorized Login to Server: "
 fi
+
+# Capture message content once for reuse
+msg_body=$(message)
+
 ###################################################
-# Logging statment
+# Send email for unauthorized logins
 #
-if [ "$Logging" == "true" ]; then
-	touch $LOG_FILE
-        message >> $LOG_FILE
+if [ "$authorized" != "true" ]; then
+    if command -v mail >/dev/null 2>&1; then
+        echo "$msg_body" | mail -s "$SUBJECT" "$EMAIL" 2>/dev/null || true
+    fi
+fi
+
+###################################################
+# Logging statement
+#
+if [ "$Logging" = "true" ]; then
+    log_dir=$(dirname "$LOG_FILE")
+    if [ -d "$log_dir" ] && [ -w "$log_dir" ] || [ -w "$LOG_FILE" ]; then
+        echo "$msg_body" >> "$LOG_FILE" 2>/dev/null || true
+    fi
 fi
 # EOF
