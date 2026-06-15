@@ -12,33 +12,19 @@
 # 5242880 KB  = 5 GB
 # 10485760 KB = 10 GB
 ##################################################
-#Set Sys Variables
-HOSTNAME=`hostname`
-IP=`hostname -I`
+# Set Sys Variables
+HOSTNAME=$(hostname)
+IP=$(hostname -I 2>/dev/null || echo "unknown")
 ##################################################
-# Message Function
+# Command paths (overridable for testing)
 #
-function message {
-echo "
-------------: Sys Info :---------------
-              
-Hostname : $HOSTNAME 
-IP : $IP
-Date-Time : `date`
-
----------------------------------------                
-
-Warning: Disk ${Disk[$i]} has $SPACEG left on
-
-
-"
-# End message Function
+DF=${DF:-/bin/df}
+AWK=${AWK:-/usr/bin/awk}
 ##################################################
 # Mail Settings
 #
-MAIL=`which mailx`
-MAILTO="user@email.com"
-SUBJECT="Warning: low Disk Space for $HOSTNAME"
+MAIL=${MAIL:-$(which mailx 2>/dev/null || echo "mailx")}
+MAILTO="${MAILTO:-user@email.com}"
 ##################################################
 # Devices to Monitor
 #
@@ -50,16 +36,70 @@ Disk[2]="/dev/sdb1"
 MinDisk[1]=5242880 # 5 GB
 MinDisk[2]=5242880 # 5 GB
 ##################################################
+# Message Function
+#
+# Usage: message <disk_device> <human_readable_space>
+function message {
+    local disk_dev="$1"
+    local space_human="$2"
+    echo "
+------------: Sys Info :---------------
+
+Hostname : $HOSTNAME
+IP : $IP
+Date-Time : $(date)
+
+---------------------------------------
+
+Warning: Disk $disk_dev has $space_human left on
+
+"
+}
+# End message Function
+##################################################
 # Main Script
 #
-for i in `/usr/bin/seq - 1 ${#Disk[@]}`;
-do
-SPACEK=`/bin/df -k ${Disk[$i]} | /usr/bin/awk '{print $4}' | tail -n 1`
-SPACEG=`/bin/df -h ${Disk[$i]} | /usr/bin/awk '{print $4}' | tail -n 1`
+for i in $(seq 1 ${#Disk[@]}); do
+    disk_device="${Disk[$i]}"
 
-if [ $SPACEK -le ${MinDisk[$i]} ];
-        then message | $MAIL -s $SUBJECT $MAILTO;
-fi
-#
+    # Skip if device is not configured
+    if [ -z "$disk_device" ]; then
+        echo "Warning: Disk[$i] is not configured, skipping." >&2
+        continue
+    fi
+
+    # Check if the device exists
+    if [ ! -e "$disk_device" ]; then
+        echo "Warning: Device $disk_device does not exist, skipping." >&2
+        continue
+    fi
+
+    # Get disk space in KB
+    SPACEK=$("$DF" -k "$disk_device" 2>/dev/null | "$AWK" '{print $4}' | tail -n 1)
+
+    # Validate SPACEK is a non-empty integer
+    if [ -z "$SPACEK" ] || ! [[ "$SPACEK" =~ ^[0-9]+$ ]]; then
+        echo "Warning: Could not get valid disk space for $disk_device (got: '$SPACEK'), skipping." >&2
+        continue
+    fi
+
+    # Get human-readable space for the alert message
+    SPACEG=$("$DF" -h "$disk_device" 2>/dev/null | "$AWK" '{print $4}' | tail -n 1)
+    if [ -z "$SPACEG" ]; then
+        SPACEG="unknown"
+    fi
+
+    # Get threshold, default to 0 if not set
+    threshold="${MinDisk[$i]:-0}"
+    if ! [[ "$threshold" =~ ^[0-9]+$ ]]; then
+        echo "Warning: Invalid threshold for $disk_device (got: '$threshold'), skipping." >&2
+        continue
+    fi
+
+    SUBJECT="Warning: low Disk Space for $HOSTNAME"
+
+    if [ "$SPACEK" -le "$threshold" ]; then
+        message "$disk_device" "$SPACEG" | "$MAIL" -s "$SUBJECT" "$MAILTO"
+    fi
 done
 #EOF
